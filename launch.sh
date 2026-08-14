@@ -3,7 +3,7 @@
 # Keeps opons_voxd.log (current) + opons_voxd.log.old (previous).
 # Rotates when the current log exceeds 5 MB.
 
-cd /home/olivier/opons-voxd
+cd "$(dirname "$0")" || exit 1
 
 LOG="opons_voxd.log"
 MAX_BYTES=5242880  # 5 MB
