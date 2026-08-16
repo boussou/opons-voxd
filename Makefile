@@ -50,8 +50,8 @@ WHISPER_LIBS := $(shell find $(WHISPER_BUILD) -name 'lib*.a' 2>/dev/null)
 # nvcc (e.g. apt nvidia-cuda-toolkit 11.5) in /usr/bin while a newer
 # toolkit lives under /usr/local/cuda. The older nvcc can't emit PTX
 # features used by current whisper.cpp (e.g. movmatrix needs PTX 7.8 / CUDA 11.8+).
-NVCC_FOUND   := $(or $(wildcard /usr/local/cuda/bin/nvcc),$(shell command -v nvcc 2>/dev/null))
-CUDART_FOUND := $(wildcard /usr/local/cuda/lib64/libcudart.so)
+NVCC_FOUND   := $(or $(wildcard /usr/local/cuda/bin/nvcc),$(wildcard /opt/cuda/bin/nvcc),$(shell command -v nvcc 2>/dev/null))
+CUDART_FOUND := $(or $(wildcard /usr/local/cuda/lib64/libcudart.so),$(wildcard /opt/cuda/targets/x86_64-linux/lib/libcudart.so))
 
 # Detect GPU compute capability via nvidia-smi (e.g. "7.5" -> "75-real").
 # "-real" suffix => only SASS for this arch, no embedded PTX. Avoids inline-asm
@@ -62,8 +62,8 @@ CUDA_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>
 ifneq ($(NVCC_FOUND),)
 ifneq ($(CUDART_FOUND),)
     HAS_CUDA     := 1
-    CUDA_DIR     := /usr/local/cuda
-    CUDA_LIBS    := -L$(CUDA_DIR)/lib64 -lcudart -lcublas -lcublasLt -lcuda
+    CUDA_DIR     := /opt/cuda
+    CUDA_LIBS    := -L/opt/cuda/targets/x86_64-linux/lib -lcudart -lcublas -lcublasLt -lcuda
     CUDA_CMAKE := -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=$(NVCC_FOUND)
     ifneq ($(strip $(CUDA_ARCH)),)
         CUDA_CMAKE += -DCMAKE_CUDA_ARCHITECTURES=$(CUDA_ARCH)
