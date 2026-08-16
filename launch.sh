@@ -5,7 +5,7 @@
 
 cd "$(dirname "$0")" || exit 1
 
-LOG="opons_voxd.log"
+LOG="/tmp/opons_voxd.log"
 MAX_BYTES=5242880  # 5 MB
 
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null)" -gt "$MAX_BYTES" ]; then
