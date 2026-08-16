@@ -1,0 +1,8 @@
+src/
+pkg/
+*.pkg.tar.zst
+*.sig
+*.log
+opons-voxd/
+whisper.cpp
+portaudio.h
