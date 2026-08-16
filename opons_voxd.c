@@ -1629,7 +1629,7 @@ static int acquire_instance_lock(void)
 
     snprintf(path, sizeof(path), "/tmp/opons-voxd-%u.lock",
              (unsigned)getuid());
-    fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(body, sizeof(body),
                  "Cannot open lock file %s: %s",
