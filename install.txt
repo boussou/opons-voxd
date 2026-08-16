@@ -5,8 +5,7 @@ cat > ~/.config/autostart/opons-voxd.desktop << 'EOF'
 Type=Application
 Name=opons-voxd
 Comment=Local speech-to-text dictation
-Exec=$HOME/.bin/opons-voxd/launch.sh
-Path=$HOME/.bin
+Exec=/bin/sh -c 'cd $HOME/.bin/opons-voxd && exec ./opons-voxd >> /tmp/opons_voxd.log 2>&1'
 Icon=audio-input-microphone
 Terminal=false
 StartupNotify=false
