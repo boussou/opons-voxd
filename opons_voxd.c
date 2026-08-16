@@ -14,6 +14,11 @@
  * Audio is captured via PortAudio, transcribed locally with
  * whisper.cpp, and shown as a desktop notification through libnotify.
  *
+ * Configuration: all parameters below can also be set in the config file
+ * $HOME/.config/opons-voxd.conf (auto-generated on first run). A variable
+ * set in the shell overrides its config-file value; otherwise the built-in
+ * default applies.
+ *
  * Environment variables:
  *   OPONS_VOXD_MODEL       path to ggml model
  *   OPONS_VOXD_LANGUAGE    ISO code or "auto" (default: "fr")
@@ -88,6 +93,13 @@
 #define CMDS_DIR            "commands"
 #define DEFAULT_PTT_HOTKEY  "ctrl+shift+space"
 #define HOTKEY_TOKENS_MAX   8
+
+/* Config file lives in the user's home, not the project tree. */
+#define CONFIG_DIR_NAME     ".config"
+#define CONFIG_FILE_NAME    "opons-voxd.conf"
+#ifndef PATH_MAX
+#define PATH_MAX            4096
+#endif
 
 /* ---- types ---- */
 
@@ -201,6 +213,7 @@ static int init_whisper(void);
 static void init_lang(void);
 static void init_device(void);
 static void init_options(void);
+static void load_config(void);
 static void build_menu(void);
 static void build_tray(void);
 static int parse_hotkey(const char *spec, unsigned int *mods,
@@ -1810,6 +1823,166 @@ static void build_tray(void)
                      G_CALLBACK(on_popup), NULL);
 }
 
+/* ---- config file ---- */
+
+/* Every tunable parameter, in the order it appears in the generated file.
+ * `value` is what gets written when a fresh config file is created; the
+ * built-in #define defaults remain the fallback if the key is left blank. */
+static const struct {
+    const char *key;
+    const char *value;
+    const char *comment;
+} config_defaults[] = {
+    { "OPONS_VOXD_MODEL", "whisper.cpp/models/ggml-medium.bin",
+      "Path to the GGML model file (relative to where you run opons-voxd)" },
+    { "OPONS_VOXD_LANGUAGE", "fr",
+      "Whisper language code, or \"auto\"" },
+    { "OPONS_VOXD_DEVICE", "",
+      "PortAudio input device index. Blank = system default microphone." },
+    { "OPONS_VOXD_COMMANDS", "1",
+      "Set to 1 to enable voice commands (0 = disabled)" },
+    { "OPONS_VOXD_CMDS_FILE", "",
+      "Explicit path to a commands file. Blank = commands/<lang>.txt" },
+    { "OPONS_VOXD_NOTIFY_PERSIST", "0",
+      "Set to 1 to keep notifications in the history (0 = transient)" },
+    { "OPONS_VOXD_NOTIFY", "quiet",
+      "Notification mode: normal | quiet | silent | off" },
+    { "OPONS_VOXD_PTT_HOTKEY", "ctrl+alt+w",
+      "Push-to-talk hotkey (e.g. ctrl+alt+w, super+space)" },
+};
+#define CONFIG_COUNT \
+    (sizeof(config_defaults) / sizeof(config_defaults[0]))
+
+/* generate_config - Write a fresh, commented config file. Best-effort:
+ * a failure is logged but non-fatal; the program still runs on its built-in
+ * defaults. Only called when the file does not already exist, so user edits
+ * are never clobbered. */
+static void generate_config(const char *path)
+{
+    FILE *fp = fopen(path, "w");
+
+    if (!fp) {
+        fprintf(stderr, "config: cannot write %s (%s)\n", path,
+                strerror(errno));
+        return;
+    }
+    fprintf(fp, "# opons-voxd configuration\n");
+    fprintf(fp, "# Format is KEY=VALUE; full-line comments start with '#'.\n");
+    fprintf(fp, "# Environment variables set in your shell override the\n");
+    fprintf(fp, "# values below. Blank values fall back to built-in defaults.\n\n");
+    for (size_t i = 0; i < CONFIG_COUNT; i++) {
+        fprintf(fp, "# %s\n%s=%s\n\n", config_defaults[i].comment,
+                config_defaults[i].key, config_defaults[i].value);
+    }
+    fclose(fp);
+}
+
+/* load_config - Seed the environment from $HOME/.config/opons-voxd.conf.
+ *
+ * Resolution order for each parameter is: shell env var (if set) > config
+ * file value > built-in default. We achieve the first two by applying each
+ * config value with setenv(key, val, 0) — the 0 means "never override" an
+ * already-set variable — so every existing getenv() call site below keeps
+ * working unchanged. Keys not prefixed OPONS_VOXD_ are ignored. */
+static void load_config(void)
+{
+    char path[PATH_MAX];
+    const char *home = getenv("HOME");
+
+    if (!home || !*home) {
+        fprintf(stderr, "config: $HOME unset, skipping config file\n");
+        return;
+    }
+
+    int n = snprintf(path, sizeof(path), "%s/%s/%s", home, CONFIG_DIR_NAME,
+                     CONFIG_FILE_NAME);
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        fprintf(stderr, "config: path too long, skipping config file\n");
+        return;
+    }
+
+    FILE *fp;
+
+    if (access(path, F_OK) == 0) {
+        /* File exists — read it. Never regenerate: doing so would clobber
+         * the user's edits (see generate_config). */
+        fp = fopen(path, "r");
+        if (!fp) {
+            fprintf(stderr,
+                    "config: %s exists but is unreadable (%s); using "
+                    "built-in defaults\n", path, strerror(errno));
+            return;
+        }
+    } else {
+        /* File truly absent — generate a template, then read it. */
+        fprintf(stderr, "config: %s not found, generating it\n", path);
+        generate_config(path);
+        fp = fopen(path, "r");
+        if (!fp) {
+            fprintf(stderr, "config: cannot read %s after generation\n",
+                    path);
+            return;
+        }
+    }
+
+    char line[512];
+    int applied = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+
+        char *s = line;
+        while (*s == ' ' || *s == '\t')
+            s++;
+        if (*s == '\0' || *s == '#')
+            continue;
+
+        char *eq = strchr(s, '=');
+        if (!eq) {
+            fprintf(stderr, "config: ignoring malformed line '%s'\n", s);
+            continue;
+        }
+
+        *eq = '\0';   /* terminate the key at '=' so setenv gets a valid name */
+        char *key = s;
+        size_t klen = strlen(key);
+        while (klen > 0 && (key[klen - 1] == ' ' || key[klen - 1] == '\t'))
+            key[--klen] = '\0';
+
+        char *val = eq + 1;   /* value starts just after the '=' */
+        while (*val == ' ' || *val == '\t')
+            val++;
+
+        /* Strip an inline comment: a '#' at the start of the value, or one
+         * preceded by whitespace. None of our values contain '#'. */
+        for (size_t i = 0; val[i] != '\0'; i++) {
+            if (val[i] == '#' &&
+                (i == 0 || val[i - 1] == ' ' || val[i - 1] == '\t')) {
+                val[i] = '\0';
+                break;
+            }
+        }
+
+        size_t vlen = strlen(val);
+        while (vlen > 0 && (val[vlen - 1] == ' ' || val[vlen - 1] == '\t'))
+            val[--vlen] = '\0';
+
+        if (strncmp(key, "OPONS_VOXD_", 11) != 0 || key[11] == '\0') {
+            fprintf(stderr, "config: ignoring non-OPONS_VOXD_ key '%s'\n",
+                    key);
+            continue;
+        }
+
+        setenv(key, val, 0);   /* 0 = keep any value already in the env */
+        applied++;
+    }
+
+    fclose(fp);
+    fprintf(stderr, "config: loaded %s (%d value%s)\n", path, applied,
+            applied == 1 ? "" : "s");
+}
+
 /* ---- main ---- */
 
 int main(int argc, char **argv)
@@ -1817,6 +1990,7 @@ int main(int argc, char **argv)
     PaError err;
 
     setlocale(LC_CTYPE, "");
+    load_config();
     if (!XInitThreads()) {
         fprintf(stderr, "XInitThreads failed\n");
         return 1;
