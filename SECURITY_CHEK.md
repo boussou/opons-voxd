@@ -39,9 +39,10 @@ A single-C-file (~1873 lines) Linux desktop daemon for local speech-to-text dict
   - `download-ggml-model.sh` for Whisper model (no checksum)
 - **Fix:** Pin whisper.cpp to a specific commit SHA. Verify portaudio.h download with a known hash.
 
-**5. Hardcoded path in `launch.sh`**
-- **Location:** `launch.sh:6` — `cd /home/olivier/opons-voxd`
-- **Issue:** Hardcoded to a specific user's home directory. If copied verbatim, the daemon silently fails (cd to nonexistent dir) or could be manipulated if `/home/olivier` is a symlink. Not exploitable but confusing for deployment.
+**5. Hardcoded path in `launch.sh` (resolved — file removed)**
+- **Location:** formerly `launch.sh:6` — `cd /home/olivier/opons-voxd`
+- **Issue:** Was hardcoded to a specific user's home directory. If copied verbatim, the daemon silently fails (cd to nonexistent dir) or could be manipulated if `/home/olivier` is a symlink. Not exploitable but confusing for deployment.
+- **Status:** Resolved — `launch.sh` has been removed; the binary is run directly and configuration now lives in `~/.config/opons-voxd.conf`.
 
 ---
 

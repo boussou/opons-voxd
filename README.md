@@ -193,10 +193,10 @@ You'll see either `[build] CUDA detected` or `[build] CUDA not found — CPU onl
 ### Step 5 — Run
 
 ```bash
-./opons-voxd
+./opons-voxd >> /tmp/opons_voxd.log 2>&1
 ```
 
-The model loads in 2–5 seconds, then the icon appears in your system tray.
+The model loads in 2–5 seconds, then the icon appears in your system tray. Output is written to `/tmp/opons_voxd.log` (append; nothing is rotated or retained). On first run the program generates `~/.config/opons-voxd.conf` — edit that file to configure it (see [Configuration](#configuration)). Append `&` to run it in the background.
 
 To confirm GPU is active, look for `CUDA0 total size` in the output (not `CPU total size`).
 
@@ -204,20 +204,37 @@ To confirm GPU is active, look for `CUDA0 total size` in the output (not `CPU to
 
 ## Configuration
 
-All configuration is done through environment variables (all optional):
+All eight parameters live in a config file at **`~/.config/opons-voxd.conf`** — simple `KEY=VALUE` lines with full-line `#` comments. The program **generates this file on first run** (if it doesn't already exist) and never overwrites it, so just edit it to customize:
 
-| Variable | Default | Description |
+```ini
+# ~/.config/opons-voxd.conf  (generated on first run — edit freely)
+
+OPONS_VOXD_MODEL=whisper.cpp/models/ggml-medium.bin   # GGML model path
+OPONS_VOXD_LANGUAGE=fr                               # ISO code or "auto"
+OPONS_VOXD_DEVICE=                                   # blank = system default mic
+OPONS_VOXD_COMMANDS=1                                # 1 = enable voice commands
+OPONS_VOXD_CMDS_FILE=                                # blank = commands/<lang>.txt
+OPONS_VOXD_NOTIFY_PERSIST=0                          # 1 = keep in history
+OPONS_VOXD_NOTIFY=quiet                              # normal|quiet|silent|off
+OPONS_VOXD_PTT_HOTKEY=ctrl+alt+w                     # push-to-talk hotkey
+```
+
+**Precedence:** a variable set in your **shell overrides** its config-file value, which overrides the built-in default. So each key also works as an environment variable for one-off runs, e.g. `OPONS_VOXD_LANGUAGE=en ./opons-voxd`.
+
+The eight keys (built-in fallback shown — used only when a key is blank or the file is absent):
+
+| Key | Built-in default | Description |
 |---|---|---|
 | `OPONS_VOXD_MODEL` | `whisper.cpp/models/ggml-medium.bin` | Path to the GGML model file |
 | `OPONS_VOXD_LANGUAGE` | `fr` | Whisper language code, or `auto` |
-| `OPONS_VOXD_DEVICE` | system default | PortAudio device index |
-| `OPONS_VOXD_COMMANDS` | `0` (disabled) | Set to `1` to enable voice commands |
-| `OPONS_VOXD_CMDS_FILE` | `commands/<lang>.txt` | Explicit path to a commands file |
+| `OPONS_VOXD_DEVICE` | system default | PortAudio device index (blank = auto) |
+| `OPONS_VOXD_COMMANDS` | `0` (disabled) | Set to `1` to enable voice commands. The generated file sets this to `1`. |
+| `OPONS_VOXD_CMDS_FILE` | `commands/<lang>.txt` | Explicit path to a commands file (blank = auto) |
 | `OPONS_VOXD_NOTIFY_PERSIST` | `0` (transient) | Set to `1` to keep notifications in history |
 | `OPONS_VOXD_NOTIFY` | `quiet` | Notification mode: `normal`, `quiet`, `silent`, `off`. Affects success notifications only — see [Notifications](#notifications) |
-| `OPONS_VOXD_PTT_HOTKEY` | `ctrl+shift+space` | Push-to-talk hotkey (e.g. `super+space`, `ctrl+alt+f1`) |
+| `OPONS_VOXD_PTT_HOTKEY` | `ctrl+shift+space` | Push-to-talk hotkey (e.g. `super+space`, `ctrl+alt+f1`). The generated file sets this to `ctrl+alt+w`. |
 
-Examples:
+Examples (one-off overrides via environment):
 
 ```bash
 # English dictation, voice commands enabled, persistent notifications
@@ -265,7 +282,7 @@ OPONS_VOXD_PTT_HOTKEY=ctrl+alt+f1 ./opons-voxd
 - Modifiers: `ctrl`, `shift`, `alt`, `super`
 - Key: any X11 keysym name returned by `xev`
 
-**Recommended ergonomic default** (and what the bundled `launch.sh` uses): `ctrl+alt+w` on AZERTY layouts, `ctrl+alt+z` on QWERTY. The physical key sits right next to `A`, so the whole combo is reachable with the left hand alone (pinky on `Ctrl`, thumb on `Alt`, ring/middle on `W`/`Z`) without disturbing typing posture, and isn't bound by default in most desktop environments. If `ctrl+shift+space` is intercepted by your IME or terminal, `ctrl+alt+w`/`ctrl+alt+z` is a safer pick.
+**Recommended ergonomic default** (and what the generated `~/.config/opons-voxd.conf` uses): `ctrl+alt+w` on AZERTY layouts, `ctrl+alt+z` on QWERTY. The physical key sits right next to `A`, so the whole combo is reachable with the left hand alone (pinky on `Ctrl`, thumb on `Alt`, ring/middle on `W`/`Z`) without disturbing typing posture, and isn't bound by default in most desktop environments. If `ctrl+shift+space` is intercepted by your IME or terminal, `ctrl+alt+w`/`ctrl+alt+z` is a safer pick.
 
 If the hotkey is malformed (unknown modifier or unknown keysym name) or the key isn't on your active XKB layout, push-to-talk is disabled with a specific stderr message and the tray icon mode keeps working normally.
 
@@ -327,7 +344,7 @@ cd ../..
 
 ## Auto-Start at Login
 
-### Using the included launcher (with rotating logs)
+### Using a `.desktop` autostart entry
 
 ```bash
 mkdir -p ~/.config/autostart
@@ -337,8 +354,7 @@ cat > ~/.config/autostart/opons-voxd.desktop << 'EOF'
 Type=Application
 Name=opons-voxd
 Comment=Local speech-to-text dictation
-Exec=/path/to/opons-voxd/launch.sh
-Path=/path/to/opons-voxd
+Exec=/bin/sh -c 'cd /path/to/opons-voxd && exec ./opons-voxd >> /tmp/opons_voxd.log 2>&1'
 Icon=audio-input-microphone
 Terminal=false
 StartupNotify=false
@@ -347,9 +363,7 @@ X-GNOME-Autostart-Delay=5
 EOF
 ```
 
-Replace `/path/to/opons-voxd` with your actual installation path.
-
-The `launch.sh` script handles log rotation: `opons_voxd.log` is capped at 5 MB, with one `.old` backup.
+Replace `/path/to/opons-voxd` with your actual installation path. The `cd` keeps the relative paths in `~/.config/opons-voxd.conf` (model, commands) resolving correctly; the wrapper appends output to `/tmp/opons_voxd.log` (nothing is rotated or retained).
 
 You can also manage this through **Menu → Preferences → Startup Applications** in Cinnamon/MATE.
 
@@ -430,7 +444,6 @@ This project uses [whisper.cpp](https://github.com/ggerganov/whisper.cpp), a C/C
 |---|---|
 | `opons_voxd.c` | Main source (~950 lines) |
 | `Makefile` | Build system with automatic CUDA detection |
-| `launch.sh` | Launcher with rotating logs for auto-start |
 | `commands/*.txt` | Voice command files (en, fr, de, es, it, zh, ja) |
 | `screenshots/` | Tray icon screenshots |
 | `README.md` | This document |

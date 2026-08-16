@@ -62,6 +62,10 @@ CUDA_ARCH ?= $(shell nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>
 ifneq ($(NVCC_FOUND),)
 ifneq ($(CUDART_FOUND),)
     HAS_CUDA     := 1
+    #debian/ubuntu
+    #CUDA_DIR     := /usr/local/cuda
+    #CUDA_LIBS    := -L$(CUDA_DIR)/lib64 -lcudart -lcublas -lcublasLt -lcuda
+    # Arch/Artix
     CUDA_DIR     := /opt/cuda
     CUDA_LIBS    := -L/opt/cuda/targets/x86_64-linux/lib -lcudart -lcublas -lcublasLt -lcuda
     CUDA_CMAKE := -DGGML_CUDA=ON -DCMAKE_CUDA_COMPILER=$(NVCC_FOUND)
@@ -127,7 +131,7 @@ endif
 	@echo "setup done. Run: make && make run"
 
 run: opons-voxd
-	OPONS_VOXD_MODEL=$(MODEL_FILE) ./opons-voxd
+	./opons-voxd >> /tmp/opons_voxd.log 2>&1
 
 clean:
 	rm -f opons-voxd
