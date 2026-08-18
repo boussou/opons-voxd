@@ -9,6 +9,8 @@
 🌍 **Translations:**
 [Français](docs/README.fr.md) · [Deutsch](docs/README.de.md) · [中文](docs/README.zh.md) · [日本語](docs/README.ja.md) · [Español](docs/README.es.md) · [Italiano](docs/README.it.md)
 
+📖 **[My Workflow: Dictate in Your Language, Type in English](WORKFLOW.md)** — a real-world use case (also translated into 20 languages)
+
 ---
 
 ## Why?
@@ -42,7 +44,7 @@ Two ways to dictate, available simultaneously:
 2. **Release the keys** → recording stops, audio is transcribed
 3. The transcribed text is **typed directly at the keyboard cursor** (via the X11 XTest extension) into whichever window has focus
 
-The hotkey is configurable via `OPONS_VOXD_PTT_HOTKEY` (see [Configuration](#configuration)).
+The hotkey is configurable via `OPONS_VOXD_PTT_HOTKEY` (see [Configuration](#configuration)). A second, independent hotkey (`OPONS_VOXD_PTT_TRANSLATE_HOTKEY`) works the same way but types an English translation instead — see [Push-to-talk-and-translate hotkey](#push-to-talk-and-translate-hotkey).
 
 ### Screenshots
 
@@ -68,6 +70,7 @@ The hotkey is configurable via `OPONS_VOXD_PTT_HOTKEY` (see [Configuration](#con
 - **Lightweight** — single C binary (~100 KB), no Python, no runtime dependencies
 - **System tray integration** — unobtrusive icon in your taskbar
 - **Push-to-talk hotkey** — hold `Ctrl+Shift+Space` (configurable) to record, release to type the transcript at the keyboard cursor
+- **Push-to-talk-and-translate hotkey** — a second, independently configurable hotkey types an English translation of your speech instead of a verbatim transcript
 - **Dual clipboard** — text is pushed to both PRIMARY and CLIPBOARD X11 selections
 - **Desktop notifications** — transcribed text displayed as a notification
 - **Voice commands** — built-in French commands for punctuation and formatting, disabled by default (`OPONS_VOXD_COMMANDS=1` to enable, see [Voice Commands](#voice-commands))
@@ -216,6 +219,8 @@ All configuration is done through environment variables (all optional):
 | `OPONS_VOXD_NOTIFY_PERSIST` | `0` (transient) | Set to `1` to keep notifications in history |
 | `OPONS_VOXD_NOTIFY` | `quiet` | Notification mode: `normal`, `quiet`, `silent`, `off`. Affects success notifications only — see [Notifications](#notifications) |
 | `OPONS_VOXD_PTT_HOTKEY` | `ctrl+shift+space` | Push-to-talk hotkey (e.g. `super+space`, `ctrl+alt+f1`) |
+| `OPONS_VOXD_PTT_TRANSLATE_HOTKEY` | `ctrl+alt+t` | Push-to-talk hotkey that translates speech to English instead of transcribing it verbatim |
+| `OPONS_VOXD_TRANSLATE_MODEL` | same as `OPONS_VOXD_MODEL`'s default | Path to the GGML model used for the translate hotkey (see below) |
 
 Examples:
 
@@ -266,6 +271,28 @@ OPONS_VOXD_PTT_HOTKEY=ctrl+alt+f1 ./opons-voxd
 - Key: any X11 keysym name returned by `xev`
 
 **Recommended ergonomic default** (and what the bundled `launch.sh` uses): `ctrl+alt+w` on AZERTY layouts, `ctrl+alt+z` on QWERTY. The physical key sits right next to `A`, so the whole combo is reachable with the left hand alone (pinky on `Ctrl`, thumb on `Alt`, ring/middle on `W`/`Z`) without disturbing typing posture, and isn't bound by default in most desktop environments. If `ctrl+shift+space` is intercepted by your IME or terminal, `ctrl+alt+w`/`ctrl+alt+z` is a safer pick.
+
+### Push-to-talk-and-translate hotkey
+
+A second, independent hotkey behaves exactly like the push-to-talk hotkey (hold to record, release to type), but runs Whisper's translate task instead of a verbatim transcription. Speak in the language configured via `OPONS_VOXD_LANGUAGE` and the typed text comes out in English — Whisper's translate task always targets English, there is no other output language. The default is `ctrl+alt+t`. Override it with `OPONS_VOXD_PTT_TRANSLATE_HOTKEY`, using the same `mod+mod+...+key` format as `OPONS_VOXD_PTT_HOTKEY`:
+
+```bash
+OPONS_VOXD_PTT_TRANSLATE_HOTKEY=ctrl+alt+e ./opons-voxd
+```
+
+If it resolves to the same combo as `OPONS_VOXD_PTT_HOTKEY`, or fails to parse, it is silently disabled (logged on stderr) and the plain push-to-talk hotkey keeps working normally.
+
+**Model**: speed-oriented models — most notably `large-v3-turbo` — were not trained on the translate task and translate poorly (they tend to just transcribe in the source language instead). Because of this, the translate hotkey uses its own model, configured independently via `OPONS_VOXD_TRANSLATE_MODEL` (default: same path as `OPONS_VOXD_MODEL`'s default, `ggml-medium.bin`). If `OPONS_VOXD_TRANSLATE_MODEL` resolves to the same path as `OPONS_VOXD_MODEL`, only one model is loaded and both hotkeys share it — no extra VRAM or startup cost. If you set `OPONS_VOXD_MODEL` to a fast transcription model like `large-v3-turbo` for everyday dictation, leave `OPONS_VOXD_TRANSLATE_MODEL` unset (or point it at `medium`/`large-v3`) so translation actually works:
+
+```bash
+OPONS_VOXD_MODEL=whisper.cpp/models/ggml-large-v3-turbo.bin \
+OPONS_VOXD_TRANSLATE_MODEL=whisper.cpp/models/ggml-medium.bin \
+./opons-voxd
+```
+
+If the translate model fails to load, the translate hotkey falls back to the main model (logged on stderr) instead of being disabled.
+
+Voice commands (see [Voice Commands](#voice-commands)) are matched against `OPONS_VOXD_LANGUAGE`-specific phrases (e.g. French keywords), so they generally won't fire on translated English output — this hotkey is meant for plain dictation, not command mode.
 
 If the hotkey is malformed (unknown modifier or unknown keysym name) or the key isn't on your active XKB layout, push-to-talk is disabled with a specific stderr message and the tray icon mode keeps working normally.
 
