@@ -21,6 +21,17 @@
  *
  * Environment variables:
  *   OPONS_VOXD_MODEL       path to ggml model
+ *   OPONS_VOXD_TRANSLATE_MODEL   path to the ggml model used for
+ *                            the translate hotkey (default: same
+ *                            as OPONS_VOXD_MODEL's default). Speed-
+ *                            oriented models such as large-v3-turbo
+ *                            were not trained on the translate task
+ *                            and translate poorly, so this is
+ *                            intentionally a separate, independently
+ *                            configurable model. When it resolves to
+ *                            the same path as OPONS_VOXD_MODEL, only
+ *                            one model is loaded and both hotkeys
+ *                            share it.
  *   OPONS_VOXD_LANGUAGE    ISO code or "auto" (default: "fr")
  *   OPONS_VOXD_DEVICE      PortAudio device index
  *   OPONS_VOXD_COMMANDS        "1" to enable voice commands
@@ -95,6 +106,7 @@
 #define CMD_INITIAL_CAP     32
 
 #define DEFAULT_MODEL       "whisper.cpp/models/ggml-medium.bin"
+#define DEFAULT_TRANSLATE_MODEL  "whisper.cpp/models/ggml-medium.bin"
 #define DEFAULT_LANG        "fr"
 #define CMDS_DIR            "commands"
 #define DEFAULT_PTT_HOTKEY  "ctrl+shift+space"
@@ -151,6 +163,7 @@ struct app {
     float                   *audio_buf;
     atomic_size_t           audio_len;
     struct whisper_context   *wctx;
+    struct whisper_context   *wctx_translate;
     char                    lang[16];
     bool                    commands_on;
     bool                    notify_persist;
@@ -222,6 +235,7 @@ static void rec_stop(void);
 static void notify_critical(const char *title, const char *body);
 static int acquire_instance_lock(void);
 static int init_whisper(void);
+static void init_whisper_translate(void);
 static void init_lang(void);
 static void init_device(void);
 static void init_options(void);
@@ -1094,6 +1108,7 @@ static void audio_stop(void)
 static char *run_whisper(const float *samples, size_t n_samples,
                          bool translate)
 {
+    struct whisper_context *ctx;
     struct whisper_full_params wp;
     int n_seg;
     int i;
@@ -1104,6 +1119,7 @@ static char *run_whisper(const float *samples, size_t n_samples,
     char *out;
     char *nout;
 
+    ctx = translate ? g_app.wctx_translate : g_app.wctx;
     wp = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
     wp.print_realtime = false;
     wp.print_progress = false;
@@ -1117,17 +1133,16 @@ static char *run_whisper(const float *samples, size_t n_samples,
     wp.language = NULL;
     if (strcmp(g_app.lang, "auto") != 0)
         wp.language = g_app.lang;
-    if (whisper_full(g_app.wctx, wp, samples,
-                     (int)n_samples) != 0)
+    if (whisper_full(ctx, wp, samples, (int)n_samples) != 0)
         return strdup("");
-    n_seg = whisper_full_n_segments(g_app.wctx);
+    n_seg = whisper_full_n_segments(ctx);
     out = malloc(cap);
     if (!out)
         return NULL;
     out[0] = '\0';
     for (i = 0; i < n_seg; i++) {
         seg_text = whisper_full_get_segment_text(
-            g_app.wctx, i);
+            ctx, i);
         while (*seg_text == ' ')
             seg_text++;
         tlen = strlen(seg_text);
@@ -1800,6 +1815,51 @@ static int init_whisper(void)
     return 0;
 }
 
+/**
+ * init_whisper_translate - Load the model used by the translate
+ * hotkey.
+ *
+ * Reads OPONS_VOXD_TRANSLATE_MODEL (default: DEFAULT_TRANSLATE_MODEL).
+ * When it resolves to the same path as the main model
+ * (OPONS_VOXD_MODEL), reuses g_app.wctx instead of loading a second
+ * copy. Must run after init_whisper(), which g_app.wctx depends on.
+ *
+ * Failure to load is non-fatal: the translate hotkey then falls
+ * back to the main model, which may translate poorly (e.g. speed-
+ * oriented models such as large-v3-turbo) but keeps working.
+ */
+static void init_whisper_translate(void)
+{
+    const char *model;
+    const char *main_model;
+    struct whisper_context_params cp;
+
+    model = getenv("OPONS_VOXD_TRANSLATE_MODEL");
+    if (!model || !*model)
+        model = DEFAULT_TRANSLATE_MODEL;
+    main_model = getenv("OPONS_VOXD_MODEL");
+    if (!main_model || !*main_model)
+        main_model = DEFAULT_MODEL;
+    if (strcmp(model, main_model) == 0) {
+        g_app.wctx_translate = g_app.wctx;
+        return;
+    }
+    fprintf(stderr, "loading translate whisper model: %s\n", model);
+    cp = whisper_context_default_params();
+    cp.use_gpu = true;
+    g_app.wctx_translate =
+        whisper_init_from_file_with_params(model, cp);
+    if (!g_app.wctx_translate) {
+        fprintf(stderr,
+                "failed to load translate model: %s, "
+                "translate hotkey will use the main model "
+                "instead\n", model);
+        g_app.wctx_translate = g_app.wctx;
+        return;
+    }
+    fprintf(stderr, "translate whisper ready\n");
+}
+
 static void init_lang(void)
 {
     const char *lang;
@@ -1951,6 +2011,7 @@ int main(int argc, char **argv)
         Pa_Terminate();
         return 1;
     }
+    init_whisper_translate();
     build_menu();
     build_tray();
     init_hotkey();
@@ -1961,6 +2022,8 @@ int main(int argc, char **argv)
         audio_stop();
     free_hotkey();
     Pa_Terminate();
+    if (g_app.wctx_translate && g_app.wctx_translate != g_app.wctx)
+        whisper_free(g_app.wctx_translate);
     whisper_free(g_app.wctx);
     free_commands();
     notify_uninit();

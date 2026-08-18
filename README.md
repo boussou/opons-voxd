@@ -218,6 +218,7 @@ All configuration is done through environment variables (all optional):
 | `OPONS_VOXD_NOTIFY` | `quiet` | Notification mode: `normal`, `quiet`, `silent`, `off`. Affects success notifications only — see [Notifications](#notifications) |
 | `OPONS_VOXD_PTT_HOTKEY` | `ctrl+shift+space` | Push-to-talk hotkey (e.g. `super+space`, `ctrl+alt+f1`) |
 | `OPONS_VOXD_PTT_TRANSLATE_HOTKEY` | `ctrl+alt+t` | Push-to-talk hotkey that translates speech to English instead of transcribing it verbatim |
+| `OPONS_VOXD_TRANSLATE_MODEL` | same as `OPONS_VOXD_MODEL`'s default | Path to the GGML model used for the translate hotkey (see below) |
 
 Examples:
 
@@ -278,6 +279,16 @@ OPONS_VOXD_PTT_TRANSLATE_HOTKEY=ctrl+alt+e ./opons-voxd
 ```
 
 If it resolves to the same combo as `OPONS_VOXD_PTT_HOTKEY`, or fails to parse, it is silently disabled (logged on stderr) and the plain push-to-talk hotkey keeps working normally.
+
+**Model**: speed-oriented models — most notably `large-v3-turbo` — were not trained on the translate task and translate poorly (they tend to just transcribe in the source language instead). Because of this, the translate hotkey uses its own model, configured independently via `OPONS_VOXD_TRANSLATE_MODEL` (default: same path as `OPONS_VOXD_MODEL`'s default, `ggml-medium.bin`). If `OPONS_VOXD_TRANSLATE_MODEL` resolves to the same path as `OPONS_VOXD_MODEL`, only one model is loaded and both hotkeys share it — no extra VRAM or startup cost. If you set `OPONS_VOXD_MODEL` to a fast transcription model like `large-v3-turbo` for everyday dictation, leave `OPONS_VOXD_TRANSLATE_MODEL` unset (or point it at `medium`/`large-v3`) so translation actually works:
+
+```bash
+OPONS_VOXD_MODEL=whisper.cpp/models/ggml-large-v3-turbo.bin \
+OPONS_VOXD_TRANSLATE_MODEL=whisper.cpp/models/ggml-medium.bin \
+./opons-voxd
+```
+
+If the translate model fails to load, the translate hotkey falls back to the main model (logged on stderr) instead of being disabled.
 
 Voice commands (see [Voice Commands](#voice-commands)) are matched against `OPONS_VOXD_LANGUAGE`-specific phrases (e.g. French keywords), so they generally won't fire on translated English output — this hotkey is meant for plain dictation, not command mode.
 
