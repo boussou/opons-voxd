@@ -10,6 +10,11 @@
  *   2. Push-to-talk hotkey: hold the configured key combo (default
  *      ctrl+shift+space) to record, release to stop. Transcript is
  *      typed at the keyboard cursor via the X11 XTest extension.
+ *      A second, independently configurable hotkey does the same
+ *      but runs Whisper's translate task instead of plain
+ *      transcription, so speech in the configured source language
+ *      is typed out in English (Whisper always translates to
+ *      English; there is no other target language).
  *
  * Audio is captured via PortAudio, transcribed locally with
  * whisper.cpp, and shown as a desktop notification through libnotify.
@@ -27,6 +32,12 @@
  *                              are ALWAYS shown with sound
  *   OPONS_VOXD_PTT_HOTKEY      push-to-talk hotkey spec, e.g.
  *                            "ctrl+shift+space" (default), "super+space"
+ *   OPONS_VOXD_PTT_TRANSLATE_HOTKEY   push-to-talk-and-translate
+ *                            hotkey spec, same syntax as
+ *                            OPONS_VOXD_PTT_HOTKEY (default:
+ *                            "ctrl+alt+t"). Speech is translated
+ *                            to English instead of transcribed
+ *                            verbatim.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -87,6 +98,7 @@
 #define DEFAULT_LANG        "fr"
 #define CMDS_DIR            "commands"
 #define DEFAULT_PTT_HOTKEY  "ctrl+shift+space"
+#define DEFAULT_PTT_TRANSLATE_HOTKEY  "ctrl+alt+t"
 #define HOTKEY_TOKENS_MAX   8
 
 /* ---- types ---- */
@@ -119,6 +131,15 @@ struct voice_cmd {
     char *replacement;
 };
 
+/* One grabbed X11 key combo: either the plain PTT hotkey or the
+ * PTT-translate hotkey. Both are handled through the same grab/
+ * ungrab/match logic, parameterized on one of these. */
+struct ptt_binding {
+    unsigned int mods;
+    unsigned int keycode;
+    bool grabbed;
+};
+
 struct app {
     GtkStatusIcon           *status_icon;
     GdkPixbuf               *icon_idle;
@@ -139,10 +160,12 @@ struct app {
     int                     cmd_cap;
     _Atomic enum app_state  state;
     Display                 *xdpy;
-    unsigned int            ptt_mods;
-    unsigned int            ptt_keycode;
-    bool                    ptt_grabbed;
+    struct ptt_binding      ptt;
+    struct ptt_binding      ptt_translate;
+    bool                    ptt_filter_installed;
     bool                    via_hotkey;
+    bool                    translate_active;
+    unsigned int            active_ptt_keycode;
 };
 
 /* ---- static prototypes ---- */
@@ -186,7 +209,8 @@ static int audio_cb(const void *in, void *out,
 static int audio_start(void);
 static void audio_stop(void);
 static char *run_whisper(const float *samples,
-                         size_t n_samples);
+                         size_t n_samples,
+                         bool translate);
 static void *transcribe_thread(void *arg);
 static void on_activate(GtkStatusIcon *icon, gpointer data);
 static void on_toggle(GtkMenuItem *item, gpointer data);
@@ -206,12 +230,15 @@ static void build_tray(void);
 static int parse_hotkey(const char *spec, unsigned int *mods,
                         KeySym *ks);
 static int x_silent_error_handler(Display *dpy, XErrorEvent *ev);
-static void grab_hotkey_combo(unsigned int extra);
-static void ungrab_hotkey_combo(unsigned int extra);
-static int resolve_ptt_hotkey(const char *spec);
+static void grab_hotkey_combo(struct ptt_binding *hk,
+                              unsigned int extra);
+static void ungrab_hotkey_combo(struct ptt_binding *hk,
+                                unsigned int extra);
+static int resolve_ptt_hotkey(const char *spec,
+                              struct ptt_binding *hk);
 static int open_ptt_display(void);
-static void grab_ptt_hotkey(void);
-static void ungrab_ptt_hotkey(void);
+static void grab_ptt_hotkey(struct ptt_binding *hk);
+static void ungrab_ptt_hotkey(struct ptt_binding *hk);
 static void init_hotkey(void);
 static void free_hotkey(void);
 static GdkFilterReturn ptt_event_filter(GdkXEvent *xev,
@@ -1055,13 +1082,17 @@ static void audio_stop(void)
 /* ---- whisper transcription ---- */
 
 /**
- * run_whisper - Transcribe a float32 PCM buffer.
+ * run_whisper - Transcribe (or translate) a float32 PCM buffer.
  * @samples: mono 16 kHz float32 audio.
  * @n_samples: number of samples.
+ * @translate: if true, run Whisper's translate task so the output
+ * is English regardless of the spoken (source) language, instead
+ * of a verbatim transcription in that language.
  *
  * Return: newly allocated string (caller must free).
  */
-static char *run_whisper(const float *samples, size_t n_samples)
+static char *run_whisper(const float *samples, size_t n_samples,
+                         bool translate)
 {
     struct whisper_full_params wp;
     int n_seg;
@@ -1078,7 +1109,7 @@ static char *run_whisper(const float *samples, size_t n_samples)
     wp.print_progress = false;
     wp.print_timestamps = false;
     wp.print_special = false;
-    wp.translate = false;
+    wp.translate = translate;
     wp.single_segment = false;
     wp.no_context = true;
     wp.suppress_blank = true;
@@ -1133,18 +1164,21 @@ static void *transcribe_thread(void *arg)
     struct timespec t1;
     char *raw;
     char *text;
+    bool translate;
 
     (void)arg;
+    translate = g_app.translate_active;
     n = atomic_load(&g_app.audio_len);
     if (n < MIN_AUDIO_SAMPLES) {
         request_notify("opons-voxd", "Empty recording", true);
         g_app.via_hotkey = false;
+        g_app.translate_active = false;
         request_state(STATE_IDLE);
         return NULL;
     }
     audio_sec = (double)n / SAMPLE_RATE;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    raw = run_whisper(g_app.audio_buf, n);
+    raw = run_whisper(g_app.audio_buf, n, translate);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     elapsed = (t1.tv_sec - t0.tv_sec)
             + (t1.tv_nsec - t0.tv_nsec) / 1e9;
@@ -1152,10 +1186,13 @@ static void *transcribe_thread(void *arg)
             "[perf] audio: %.1f s | transcription: %.2f s"
             " | ratio: %.1fx realtime\n",
             audio_sec, elapsed, audio_sec / elapsed);
+    if (translate)
+        fprintf(stderr, "[perf] translate: %s->en\n", g_app.lang);
     if (!raw || !*raw) {
         free(raw);
         request_notify("opons-voxd", "No speech detected", true);
         g_app.via_hotkey = false;
+        g_app.translate_active = false;
         request_state(STATE_IDLE);
         return NULL;
     }
@@ -1191,6 +1228,7 @@ static void *transcribe_thread(void *arg)
     }
     free(text);
     g_app.via_hotkey = false;
+    g_app.translate_active = false;
     request_state(STATE_IDLE);
     return NULL;
 }
@@ -1368,36 +1406,39 @@ static int x_silent_error_handler(Display *dpy, XErrorEvent *ev)
 }
 
 /**
- * grab_hotkey_combo - Grab the configured key with one mod overlay.
+ * grab_hotkey_combo - Grab @hk's key with one mod overlay.
+ * @hk: hotkey binding to grab (its mods/keycode must already be
+ * resolved).
  * @extra: extra modifier bits to OR into the base modifier mask
  * (typically combinations of LockMask and Mod2Mask, so the grab
  * still triggers when CapsLock or NumLock is on).
  */
-static void grab_hotkey_combo(unsigned int extra)
+static void grab_hotkey_combo(struct ptt_binding *hk,
+                              unsigned int extra)
 {
-    XGrabKey(g_app.xdpy, (int)g_app.ptt_keycode,
-             g_app.ptt_mods | extra,
+    XGrabKey(g_app.xdpy, (int)hk->keycode,
+             hk->mods | extra,
              DefaultRootWindow(g_app.xdpy),
              True, GrabModeAsync, GrabModeAsync);
 }
 
 /**
  * ungrab_hotkey_combo - Symmetric counterpart to grab_hotkey_combo.
+ * @hk: hotkey binding to ungrab.
  * @extra: same extra modifier bits used at grab time.
  */
-static void ungrab_hotkey_combo(unsigned int extra)
+static void ungrab_hotkey_combo(struct ptt_binding *hk,
+                                unsigned int extra)
 {
-    XUngrabKey(g_app.xdpy, (int)g_app.ptt_keycode,
-               g_app.ptt_mods | extra,
+    XUngrabKey(g_app.xdpy, (int)hk->keycode,
+               hk->mods | extra,
                DefaultRootWindow(g_app.xdpy));
 }
 
 /**
- * resolve_ptt_hotkey - Read OPONS_VOXD_PTT_HOTKEY and parse it.
+ * resolve_ptt_hotkey - Parse a hotkey spec into @hk.
  * @spec: hotkey spec string (env or default).
- *
- * Stores the parsed modifier mask in g_app.ptt_mods and the
- * resolved keycode in g_app.ptt_keycode.
+ * @hk: out, receives the parsed modifier mask and resolved keycode.
  *
  * Return: 0 on success, -1 if @spec is malformed (unknown modifier
  * or unknown keysym name), -2 if the keysym is valid but is not
@@ -1406,15 +1447,14 @@ static void ungrab_hotkey_combo(unsigned int extra)
  * declare; xev shows it but xmodmap -pke does not). The caller
  * uses the distinction to print a useful diagnostic.
  */
-static int resolve_ptt_hotkey(const char *spec)
+static int resolve_ptt_hotkey(const char *spec, struct ptt_binding *hk)
 {
     KeySym ks;
 
-    if (parse_hotkey(spec, &g_app.ptt_mods, &ks) != 0)
+    if (parse_hotkey(spec, &hk->mods, &ks) != 0)
         return -1;
-    g_app.ptt_keycode =
-        (unsigned int)XKeysymToKeycode(g_app.xdpy, ks);
-    if (g_app.ptt_keycode == 0)
+    hk->keycode = (unsigned int)XKeysymToKeycode(g_app.xdpy, ks);
+    if (hk->keycode == 0)
         return -2;
     return 0;
 }
@@ -1439,91 +1479,133 @@ static int open_ptt_display(void)
 }
 
 /**
- * grab_ptt_hotkey - Grab the parsed hotkey on the X root window.
+ * grab_ptt_hotkey - Grab @hk's key on the X root window.
+ * @hk: hotkey binding to grab (its mods/keycode must already be
+ * resolved).
  *
  * Grabs four mod-overlay variants so the hotkey works regardless of
  * CapsLock/NumLock state. Errors (e.g. BadAccess if another client
  * already holds the grab) are silently swallowed by an error handler
  * scoped to this function.
  */
-static void grab_ptt_hotkey(void)
+static void grab_ptt_hotkey(struct ptt_binding *hk)
 {
     int (*old_handler)(Display *, XErrorEvent *);
 
     old_handler = XSetErrorHandler(x_silent_error_handler);
-    grab_hotkey_combo(0);
-    grab_hotkey_combo(LockMask);
-    grab_hotkey_combo(Mod2Mask);
-    grab_hotkey_combo(LockMask | Mod2Mask);
+    grab_hotkey_combo(hk, 0);
+    grab_hotkey_combo(hk, LockMask);
+    grab_hotkey_combo(hk, Mod2Mask);
+    grab_hotkey_combo(hk, LockMask | Mod2Mask);
     XSync(g_app.xdpy, False);
     XSetErrorHandler(old_handler);
-    g_app.ptt_grabbed = true;
-    gdk_window_add_filter(NULL, ptt_event_filter, NULL);
+    hk->grabbed = true;
 }
 
 /**
- * ungrab_ptt_hotkey - Release the grabs and remove the GDK filter.
+ * ungrab_ptt_hotkey - Release @hk's grabs.
+ * @hk: hotkey binding to release.
  *
  * Symmetric counterpart to grab_ptt_hotkey, called from free_hotkey
  * during shutdown.
  */
-static void ungrab_ptt_hotkey(void)
+static void ungrab_ptt_hotkey(struct ptt_binding *hk)
 {
     int (*old_handler)(Display *, XErrorEvent *);
 
-    if (!g_app.ptt_grabbed)
+    if (!hk->grabbed)
         return;
-    gdk_window_remove_filter(NULL, ptt_event_filter, NULL);
     old_handler = XSetErrorHandler(x_silent_error_handler);
-    ungrab_hotkey_combo(0);
-    ungrab_hotkey_combo(LockMask);
-    ungrab_hotkey_combo(Mod2Mask);
-    ungrab_hotkey_combo(LockMask | Mod2Mask);
+    ungrab_hotkey_combo(hk, 0);
+    ungrab_hotkey_combo(hk, LockMask);
+    ungrab_hotkey_combo(hk, Mod2Mask);
+    ungrab_hotkey_combo(hk, LockMask | Mod2Mask);
     XSync(g_app.xdpy, False);
     XSetErrorHandler(old_handler);
-    g_app.ptt_grabbed = false;
+    hk->grabbed = false;
 }
 
 /**
- * init_hotkey - Parse OPONS_VOXD_PTT_HOTKEY, grab it on the X root.
+ * init_hotkey - Parse and grab both PTT hotkeys.
  *
- * Failures are non-fatal: if parsing fails, no X display is available,
- * or the key is already grabbed by another client, push-to-talk is
+ * Reads OPONS_VOXD_PTT_HOTKEY (plain dictation) and
+ * OPONS_VOXD_PTT_TRANSLATE_HOTKEY (dictation translated to
+ * English), grabbing each independently on the X root window.
+ * Failures are non-fatal and scoped to the affected hotkey: if a
+ * spec fails to parse, no X display is available, a key is already
+ * grabbed by another client, or the two hotkeys resolve to the same
+ * combo, that hotkey (or both, if the display is unavailable) is
  * silently disabled and the tray mode keeps working.
  */
 static void init_hotkey(void)
 {
     const char *spec;
+    const char *tr_spec;
     int rc;
 
     spec = getenv("OPONS_VOXD_PTT_HOTKEY");
     if (!spec || !*spec)
         spec = DEFAULT_PTT_HOTKEY;
+    tr_spec = getenv("OPONS_VOXD_PTT_TRANSLATE_HOTKEY");
+    if (!tr_spec || !*tr_spec)
+        tr_spec = DEFAULT_PTT_TRANSLATE_HOTKEY;
+
     if (open_ptt_display() != 0) {
         fprintf(stderr,
                 "ptt: no X display, "
                 "push-to-talk disabled\n");
         return;
     }
-    rc = resolve_ptt_hotkey(spec);
+
+    rc = resolve_ptt_hotkey(spec, &g_app.ptt);
     if (rc == -1) {
         fprintf(stderr,
                 "ptt: cannot parse hotkey '%s' (unknown "
                 "modifier or unknown keysym name), "
                 "push-to-talk disabled\n", spec);
-        return;
-    }
-    if (rc == -2) {
+    } else if (rc == -2) {
         fprintf(stderr,
                 "ptt: keysym in '%s' is not mapped to any "
                 "keycode on this X server. Run `xev` to see "
                 "what your key actually sends, or check "
                 "`xmodmap -pke`. Push-to-talk disabled.\n",
                 spec);
-        return;
+    } else {
+        grab_ptt_hotkey(&g_app.ptt);
+        fprintf(stderr, "ptt: hotkey '%s' active\n", spec);
     }
-    grab_ptt_hotkey();
-    fprintf(stderr, "ptt: hotkey '%s' active\n", spec);
+
+    rc = resolve_ptt_hotkey(tr_spec, &g_app.ptt_translate);
+    if (rc == -1) {
+        fprintf(stderr,
+                "ptt: cannot parse translate hotkey '%s' "
+                "(unknown modifier or unknown keysym name), "
+                "translate push-to-talk disabled\n", tr_spec);
+    } else if (rc == -2) {
+        fprintf(stderr,
+                "ptt: keysym in translate hotkey '%s' is not "
+                "mapped to any keycode on this X server. Run "
+                "`xev` to see what your key actually sends, or "
+                "check `xmodmap -pke`. Translate push-to-talk "
+                "disabled.\n", tr_spec);
+    } else if (g_app.ptt.grabbed &&
+              g_app.ptt.mods == g_app.ptt_translate.mods &&
+              g_app.ptt.keycode == g_app.ptt_translate.keycode) {
+        fprintf(stderr,
+                "ptt: translate hotkey '%s' is identical to the "
+                "push-to-talk hotkey, translate push-to-talk "
+                "disabled\n", tr_spec);
+    } else {
+        grab_ptt_hotkey(&g_app.ptt_translate);
+        fprintf(stderr,
+                "ptt: translate hotkey '%s' active (speech -> "
+                "English)\n", tr_spec);
+    }
+
+    if (g_app.ptt.grabbed || g_app.ptt_translate.grabbed) {
+        gdk_window_add_filter(NULL, ptt_event_filter, NULL);
+        g_app.ptt_filter_installed = true;
+    }
 }
 
 /**
@@ -1535,14 +1617,23 @@ static void init_hotkey(void)
  */
 static void free_hotkey(void)
 {
-    ungrab_ptt_hotkey();
+    if (g_app.ptt_filter_installed) {
+        gdk_window_remove_filter(NULL, ptt_event_filter, NULL);
+        g_app.ptt_filter_installed = false;
+    }
+    ungrab_ptt_hotkey(&g_app.ptt);
+    ungrab_ptt_hotkey(&g_app.ptt_translate);
 }
 
 /*
  * GDK event filter: peek at every X event delivered to this client
- * and react to KeyPress/KeyRelease for the grabbed hotkey. We
- * mask out LockMask/Mod2Mask before comparing modifiers so the
- * filter matches regardless of CapsLock or NumLock state.
+ * and react to KeyPress/KeyRelease for either grabbed hotkey (plain
+ * PTT or PTT-translate). We mask out LockMask/Mod2Mask before
+ * comparing modifiers so the filter matches regardless of CapsLock
+ * or NumLock state. Whichever key started the current recording is
+ * remembered in g_app.active_ptt_keycode so that, if the other
+ * hotkey is also pressed while the first is still held, its release
+ * is ignored instead of prematurely stopping the wrong recording.
  */
 static GdkFilterReturn ptt_event_filter(GdkXEvent *xev,
                                         GdkEvent *gev,
@@ -1551,26 +1642,35 @@ static GdkFilterReturn ptt_event_filter(GdkXEvent *xev,
     XEvent *e = xev;
     unsigned int mods;
     enum app_state s;
+    bool is_ptt;
+    bool is_translate;
 
     (void)gev;
     (void)data;
-    if (!g_app.ptt_grabbed)
+    if (!g_app.ptt.grabbed && !g_app.ptt_translate.grabbed)
         return GDK_FILTER_CONTINUE;
     if (e->type != KeyPress && e->type != KeyRelease)
         return GDK_FILTER_CONTINUE;
-    if (e->xkey.keycode != g_app.ptt_keycode)
-        return GDK_FILTER_CONTINUE;
     mods = e->xkey.state & ~(LockMask | Mod2Mask);
-    if (mods != g_app.ptt_mods)
+    is_ptt = g_app.ptt.grabbed &&
+             e->xkey.keycode == g_app.ptt.keycode &&
+             mods == g_app.ptt.mods;
+    is_translate = g_app.ptt_translate.grabbed &&
+                   e->xkey.keycode == g_app.ptt_translate.keycode &&
+                   mods == g_app.ptt_translate.mods;
+    if (!is_ptt && !is_translate)
         return GDK_FILTER_CONTINUE;
     s = atomic_load(&g_app.state);
     if (e->type == KeyPress) {
         if (s == STATE_IDLE) {
             g_app.via_hotkey = true;
+            g_app.translate_active = is_translate;
+            g_app.active_ptt_keycode = e->xkey.keycode;
             rec_start();
         }
     } else {
-        if (s == STATE_RECORDING && g_app.via_hotkey)
+        if (s == STATE_RECORDING && g_app.via_hotkey &&
+            e->xkey.keycode == g_app.active_ptt_keycode)
             rec_stop();
     }
     return GDK_FILTER_REMOVE;
