@@ -9,6 +9,8 @@
 🌍 **Translations:**
 [Français](docs/README.fr.md) · [Deutsch](docs/README.de.md) · [中文](docs/README.zh.md) · [日本語](docs/README.ja.md) · [Español](docs/README.es.md) · [Italiano](docs/README.it.md)
 
+📖 **[My Workflow: Dictate in Your Language, Type in English](WORKFLOW.md)** — a real-world use case (also translated into 20 languages)
+
 ---
 
 ## Why?
